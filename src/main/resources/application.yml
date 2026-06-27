@@ -1,0 +1,46 @@
+server:
+  port: 8080
+
+spring:
+  ai:
+    ollama:
+      base-url: http://host.docker.internal:11434
+      api-key: ${OLLAMA_API_KEY}
+      chat:
+        options:
+          model: minimax-m2.5:cloud
+        api-key: ${OLLAMA_API_KEY}
+      embedding:
+        options:
+          model: nomic-embed-text:v1.5
+        api-key: ${OLLAMA_API_KEY}
+    vectorstore:
+      qdrant:
+        host: qdrant
+        port: 6334          # gRPC
+        api-key: ${QDRANT_API_KEY}
+        collection-name: rag_chunks
+        use-tls: false
+        initialize-schema: true
+  datasource:
+    url: jdbc:h2:mem:rag_docs
+    driver-class-name: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+
+rag:
+  chunk:
+    size: 1000
+    overlap: 200
+  retrieval:
+    top-k: 5
+    similarity-threshold: 0.7
+  documents:
+    max-file-size: 52428800   # 50 MB
+  web-search:
+    enabled: true
+    searxng-url: http://searxng:8080

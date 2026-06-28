@@ -267,12 +267,6 @@ JAR-артефакт будет создан в `build/libs/`.
 ./gradlew test
 ```
 
-## Известные ограничения
-
-- В `docker-compose.yml` для демонстрации захардкожены API-ключи. Для продакшена используйте секрет-менеджер или `.env`-файл.
-- `OllamaQuotaHandler.extractResetTime()` возвращает `"unknown"`, если тело ответа не содержит поля `reset_time`.
-- Spring Boot использует только `application.yml` (файл `application.properties` — артефакт сборки и не должен редактироваться вручную).
-
 ## Лицензия
 
 MIT

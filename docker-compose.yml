@@ -5,8 +5,8 @@ services:
     ports:
       - "8080:8080"
     environment:
-      - OLLAMA_API_KEY=5e15b40f78e247e59b7e8bbf94aa4ab1.Kgaz6TC3esrOOtAVQaEU_iAz
-      - SPRING_AI_OLLAMA_API_KEY=5e15b40f78e247e59b7e8bbf94aa4ab1.Kgaz6TC3esrOOtAVQaEU_iAz
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY}
+      - SPRING_AI_OLLAMA_API_KEY=${OLLAMA_API_KEY}
       - SPRING_AI_VECTORSTORE_QDRANT_HOST=qdrant
       - SPRING_AI_VECTORSTORE_QDRANT_API_KEY=${QDRANT_API_KEY:-rag-secret-key}
       - RAG_WEB_SEARCH_SEARXNG_URL=http://searxng:8080
@@ -27,7 +27,7 @@ services:
     environment:
       # Переменная вложенная; значение '1' явно включает проверку API-ключа
       - QDRANT__SERVICE__ENABLE_API_KEY=1
-      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY:-rag-secret-key}
+      - QDRANT__SERVICE__API_KEY=${QDRANT_API_KEY}
 
   searxng:
     image: searxng/searxng:latest

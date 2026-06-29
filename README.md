@@ -52,7 +52,7 @@ src/main/java/com/rag/rag_service/
 | Переменная | Назначение | Обязательная |
 |---|---|---|
 | `OLLAMA_API_KEY` | API-ключ Ollama Cloud | да |
-| `QDRANT_API_KEY` | API-ключ Qdrant (если включён) | нет, по умолчанию `rag-secret-key` |
+| `QDRANT_API_KEY` | API-ключ Qdrant| да |
 
 ## Запуск
 

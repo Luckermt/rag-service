@@ -44,8 +44,8 @@ src/main/java/com/rag/rag_service/
 ## Требования
 
 - Docker 24+ и Docker Compose v2
-- API-ключ Ollama Cloud ([получить здесь](https://ollama.com/settings/keys))
-- (опционально) API-ключ Qdrant, если включается аутентификация
+- API-ключ Ollama
+- API-ключ Qdrant
 
 ## Переменные окружения
 

@@ -54,5 +54,5 @@ gradle-app.setting
 .gradletasknamecache
 
 .claude/
-
+docs/
 .env

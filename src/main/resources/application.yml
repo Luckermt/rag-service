@@ -44,3 +44,5 @@ rag:
   web-search:
     enabled: true
     searxng-url: http://searxng:8080
+  dialog:
+    max-history-messages: 20

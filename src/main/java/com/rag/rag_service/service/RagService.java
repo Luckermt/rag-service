@@ -1,12 +1,14 @@
 package com.rag.rag_service.service;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.SystemMessage;
 import org.springframework.ai.chat.messages.UserMessage;
 import org.springframework.ai.chat.prompt.Prompt;
@@ -52,6 +54,9 @@ public class RagService {
     @Value("${rag.retrieval.similarity-threshold}")
     private double similarityThreshold;
 
+    @Value("${rag.dialog.max-history-messages}")
+    private int maxHistoryMessages;
+
     private static final String SYSTEM_TEMPLATE = """
             Ты — помощник, отвечающий на основе контекста.
             Отвечай только на основе контекста. Если ответа нет — скажи об этом.
@@ -62,48 +67,47 @@ public class RagService {
             """;
 
     public ChatResponse chat(ChatRequest request) {
-        String userMessage = extractLastUserMessage(request.getMessages());
-        List<Document> retrieved = retrieveRelevant(userMessage);
+        String lastUser = extractLastUserMessage(request.getMessages());
+        List<Document> retrieved = retrieveRelevant(lastUser);
         String context = buildContext(retrieved);
 
         if ((retrieved.isEmpty() || context.length() < 100) && webSearchService.isEnabled()) {
-            String webResults = webSearchService.search(userMessage);
+            String webResults = webSearchService.search(lastUser);
             if (webResults != null && !webResults.isBlank()) {
                 context += "\n\nРезультаты веб-поиска:\n" + webResults;
             }
         }
 
         String systemPrompt = String.format(SYSTEM_TEMPLATE, context);
-        var prompt = new Prompt(List.of(
-                new SystemMessage(systemPrompt),
-                new UserMessage(userMessage)
-        ));
+        List<Message> history = buildMessageList(request);
 
-        var aiResponse = chatModel.call(prompt);
+        List<org.springframework.ai.chat.messages.Message> promptMessages = new ArrayList<>();
+        promptMessages.add(new SystemMessage(systemPrompt));
+        for (Message m : history) {
+            if ("assistant".equals(m.getRole())) {
+                promptMessages.add(new AssistantMessage(m.getContent()));
+            } else {
+                promptMessages.add(new UserMessage(m.getContent()));
+            }
+        }
+
+        var aiResponse = chatModel.call(new Prompt(promptMessages));
         return mapToChatResponse(aiResponse, request.getModel());
     }
 
     public Flux<ServerSentEvent<String>> streamChat(ChatRequest request) {
-        String userMessage = extractLastUserMessage(request.getMessages());
-        List<Document> retrieved = retrieveRelevant(userMessage);
+        String lastUser = extractLastUserMessage(request.getMessages());
+        List<Document> retrieved = retrieveRelevant(lastUser);
         String context = buildContext(retrieved);
         if ((retrieved.isEmpty() || context.length() < 100) && webSearchService.isEnabled()) {
-            String webResults = webSearchService.search(userMessage);
+            String webResults = webSearchService.search(lastUser);
             if (webResults != null && !webResults.isBlank()) {
                 context += "\n\nРезультаты веб-поиска:\n" + webResults;
             }
         }
 
         String systemPrompt = String.format(SYSTEM_TEMPLATE, context);
-        Map<String, Object> body = Map.of(
-                "model", request.getModel() != null ? request.getModel() : "minimax-m2.5:cloud",
-                "messages", List.of(
-                        Map.of("role", "system", "content", systemPrompt),
-                        Map.of("role", "user", "content", userMessage)
-                ),
-                "stream", true
-        );
-
+        Map<String, Object> body = buildStreamBody(systemPrompt, request);
         String chatId = "chatcmpl-" + UUID.randomUUID().toString().substring(0, 8);
         return ollamaWebClient.post()
                 .uri("/api/chat")
@@ -143,6 +147,22 @@ public class RagService {
                 .orElseThrow(() -> new IllegalArgumentException("No user message found"));
     }
 
+    private List<Message> buildMessageList(ChatRequest request) {
+        List<Message> all = request.getMessages();
+        if (all == null || all.isEmpty()) {
+            throw new IllegalArgumentException("No user message found");
+        }
+        List<Message> filtered = all.stream()
+                .filter(m -> m.getRole() != null
+                        && (m.getRole().equals("user") || m.getRole().equals("assistant")))
+                .toList();
+        if (filtered.isEmpty()) {
+            throw new IllegalArgumentException("No user message found");
+        }
+        int fromIndex = Math.max(0, filtered.size() - maxHistoryMessages);
+        return new ArrayList<>(filtered.subList(fromIndex, filtered.size()));
+    }
+
     private ChatResponse mapToChatResponse(org.springframework.ai.chat.model.ChatResponse aiResp, String model) {
         ChatResponse resp = new ChatResponse();
         resp.setId("chatcmpl-" + UUID.randomUUID().toString().substring(0, 8));
@@ -163,6 +183,19 @@ public class RagService {
         usage.setTotalTokens(usage.getPromptTokens() + usage.getCompletionTokens());
         resp.setUsage(usage);
         return resp;
+    }
+
+    private Map<String, Object> buildStreamBody(String systemPrompt, ChatRequest request) {
+        List<Map<String, String>> msgs = new ArrayList<>();
+        msgs.add(Map.of("role", "system", "content", systemPrompt));
+        for (Message m : buildMessageList(request)) {
+            msgs.add(Map.of("role", m.getRole(), "content", m.getContent()));
+        }
+        return Map.of(
+                "model", request.getModel() != null ? request.getModel() : "minimax-m2.5:cloud",
+                "messages", msgs,
+                "stream", true
+        );
     }
 
     private ServerSentEvent<String> convertToOpenAiChunk(OllamaStreamChunk chunk, String chatId, String model) {

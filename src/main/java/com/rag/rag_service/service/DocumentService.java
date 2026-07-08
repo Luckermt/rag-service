@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 
 import org.springframework.ai.document.Document;
@@ -133,25 +134,32 @@ public class DocumentService {
         return docRepo.findAll();
     }
 
-    @Transactional
     public void deleteDocument(UUID id) {
-        docRepo.findById(id).ifPresent(doc -> {
-            try {
-                qdrantClient.deleteAsync(
-                    DeletePoints.newBuilder()
-                        .setCollectionName(collectionName)
-                        .setPoints(PointsSelector.newBuilder()
-                            .setFilter(Points.Filter.newBuilder()
-                                .addMust(matchKeyword("document_id", id.toString()))
-                                .build())
+        DocumentMetadata doc = docRepo.findById(id).orElse(null);
+        if (doc == null) {
+            log.warn("Document {} not found in DB, nothing to delete", id);
+            return;
+        }
+
+        try {
+            qdrantClient.deleteAsync(
+                DeletePoints.newBuilder()
+                    .setCollectionName(collectionName)
+                    .setPoints(PointsSelector.newBuilder()
+                        .setFilter(Points.Filter.newBuilder()
+                            .addMust(matchKeyword("document_id", id.toString()))
                             .build())
-                        .build()
-                ).get();
-                log.info("Deleted Qdrant points for document {}", id);
-            } catch (Exception e) {
-                log.error("Failed to delete chunks for document {}", id, e);
-            }
+                        .build())
+                    .build()
+            ).get(5, TimeUnit.SECONDS);
+
+            log.info("Deleted Qdrant points for document {}", id);
             docRepo.deleteById(id);
-        });
+            log.info("Document {} deleted from DB", id);
+
+        } catch (Exception e) {
+            log.error("Failed to delete Qdrant chunks for document {}, DB record kept", id, e);
+            throw new RuntimeException("Failed to delete document from vector store", e);
+        }
     }
 }

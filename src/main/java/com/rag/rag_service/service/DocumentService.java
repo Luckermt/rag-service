@@ -58,30 +58,31 @@ public class DocumentService {
     @Value("${rag.documents.max-file-size}")
     private long maxFileSize;
 
-    @Transactional
     public DocumentUploadResult upload(MultipartFile file) throws IOException {
         if (file.getSize() > maxFileSize) {
             throw new IllegalArgumentException("File size exceeds " + maxFileSize + " bytes");
         }
+        return uploadFromBytes(file.getBytes(), file.getOriginalFilename());
+    }
+
+    public DocumentUploadResult uploadFromBytes(byte[] content, String fileName) {
         UUID id = UUID.randomUUID();
         DocumentMetadata doc = DocumentMetadata.builder()
                 .id(id)
-                .fileName(file.getOriginalFilename())
+                .fileName(fileName)
                 .status(DocumentStatus.PROCESSING)
                 .chunkCount(0)
                 .build();
         docRepo.save(doc);
 
-        byte[] fileBytes = file.getBytes();
-        CompletableFuture.runAsync(() -> processDocument(doc, fileBytes, file.getOriginalFilename()), asyncExecutor)
+        CompletableFuture.runAsync(() -> processDocument(doc, content, fileName), asyncExecutor)
                 .exceptionally(e -> {
                     log.error("Processing failed for doc {}", id, e);
                     updateStatus(id, DocumentStatus.FAILED);
                     return null;
                 });
 
-        return new DocumentUploadResult(id.toString(), file.getOriginalFilename(),
-                DocumentStatus.PROCESSING.name(), 0);
+        return new DocumentUploadResult(id.toString(), fileName, DocumentStatus.PROCESSING.name(), 0);
     }
 
     private void processDocument(DocumentMetadata doc, byte[] content, String fileName) {

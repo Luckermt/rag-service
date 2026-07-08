@@ -1,19 +1,21 @@
 package com.rag.rag_service.parser;
 
-import org.springframework.stereotype.Component;
-
 import java.util.Map;
+
+import org.springframework.stereotype.Component;
 
 @Component
 public class DocumentParserFactory {
     private final Map<String, DocumentParser> parserMap;
 
-    public DocumentParserFactory(TxtParser txt, MarkdownParser md, PdfParser pdf, DocxParser docx) {
+    public DocumentParserFactory(TxtParser txt, MarkdownParser md, PdfParser pdf, DocxParser docx, HtmlParser html) {
         parserMap = Map.of(
             "txt", txt,
             "md", md,
             "pdf", pdf,
-            "docx", docx
+            "docx", docx,
+            "html", html,
+            "htm", html
         );
     }
 

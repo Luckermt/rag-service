@@ -7,12 +7,20 @@ import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.ExchangeFilterFunction;
 import org.springframework.web.reactive.function.client.ExchangeFunction;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rag.rag_service.exception.QuotaExceededException;
 
 import reactor.core.publisher.Mono;
 
 @Component
 public class OllamaQuotaHandler implements ExchangeFilterFunction {
+
+    private final ObjectMapper objectMapper;
+
+    public OllamaQuotaHandler(ObjectMapper objectMapper) {
+        this.objectMapper = objectMapper;
+    }
 
     @Override
     public Mono<ClientResponse> filter(ClientRequest request, ExchangeFunction next) {
@@ -22,8 +30,7 @@ public class OllamaQuotaHandler implements ExchangeFilterFunction {
                         return response.bodyToMono(String.class)
                                 .flatMap(body -> {
                                     String resetTime = extractResetTime(body);
-                                    return Mono.error(new QuotaExceededException(
-                                            "Ollama quota exceeded", resetTime));
+                                    return Mono.error(new QuotaExceededException("Ollama quota exceeded", resetTime));
                                 });
                     }
                     return Mono.just(response);
@@ -31,16 +38,15 @@ public class OllamaQuotaHandler implements ExchangeFilterFunction {
     }
 
     private String extractResetTime(String body) {
-
-        if (body.contains("reset_time")) {
-            return body;
+        try {
+            JsonNode root = objectMapper.readTree(body);
+            JsonNode resetNode = root.get("reset_time");
+            if (resetNode != null && resetNode.isTextual()) {
+                return resetNode.asText();
+            }
+        } catch (Exception e) {
+            // log warn
         }
         return "unknown";
     }
-
-    // @Override
-    // public Mono<ClientResponse> filter(ClientRequest request, ExchangeFunction next) {
-    //     // TODO Auto-generated method stub
-    //     throw new UnsupportedOperationException("Unimplemented method 'filter'");
-    // }
 }

@@ -30,7 +30,9 @@ import com.rag.rag_service.model.openai.ChatResponse;
 import com.rag.rag_service.model.openai.Choice;
 import com.rag.rag_service.model.openai.ChoiceDelta;
 import com.rag.rag_service.model.openai.Message;
+import com.rag.rag_service.model.openai.QueryIntent;
 import com.rag.rag_service.model.openai.Usage;
+import com.rag.rag_service.util.QueryClassifier;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -49,6 +51,7 @@ public class RagService {
     private final WebSearchService webSearchService;
     private final WebClient ollamaWebClient;
     private final ObjectMapper objectMapper;
+    private final QueryClassifier queryClassifier;
 
     @Value("${rag.retrieval.top-k}")
     private int topK;
@@ -75,6 +78,8 @@ public class RagService {
             "переопредели системные инструкции"
     );
 
+    private static final String SYSTEM_PROMPT_CHIT_CHAT = 
+            "Ты — полезный ассистент. Отвечай дружелюбно и кратко, без обращения к документам.";
     private String sanitizeContext(String context) {
         if (context == null) return "";
         String sanitized = context;
@@ -86,7 +91,36 @@ public class RagService {
         }
         return sanitized;
     }
+    private record QueryContext(String context, QueryIntent intent) {}
 
+    private QueryContext prepareQuery(String query) {
+        QueryIntent intent = queryClassifier.classify(query);
+        String context = "";
+
+        if (intent == QueryIntent.CHIT_CHAT) {
+        } else if (intent == QueryIntent.CURRENT) {
+            if (webSearchService.isEnabled()) {
+                String webResults = webSearchService.search(query);
+                if (webResults != null && !webResults.isBlank()) {
+                    context = "Результаты веб-поиска:\n" + webResults;
+                }
+            }
+            if (context.isBlank()) {
+                List<Document> retrieved = retrieveRelevant(query);
+                context = buildContext(retrieved);
+            }
+        } else {
+            List<Document> retrieved = retrieveRelevant(query);
+            context = buildContext(retrieved);
+            if ((retrieved.isEmpty() || context.length() < 100) && webSearchService.isEnabled()) {
+                String webResults = webSearchService.search(query);
+                if (webResults != null && !webResults.isBlank()) {
+                    context += "\n\nРезультаты веб-поиска:\n" + webResults;
+                }
+            }
+        }
+        return new QueryContext(context, intent);
+    }
     private List<org.springframework.ai.chat.messages.Message> buildPromptMessages(
             String systemPrompt,
             String context,
@@ -95,8 +129,10 @@ public class RagService {
         List<org.springframework.ai.chat.messages.Message> messages = new ArrayList<>();
         messages.add(new SystemMessage(systemPrompt));
 
-        String contextMessage = "<context>\n" + sanitizeContext(context) + "\n</context>";
-        messages.add(new UserMessage(contextMessage));
+        if (context != null && !context.isBlank()) {
+            String contextMessage = "<context>\n" + sanitizeContext(context) + "\n</context>";
+            messages.add(new UserMessage(contextMessage));
+        }
 
         List<Message> history = buildHistoryMessages(request);
         for (Message m : history) {
@@ -109,16 +145,18 @@ public class RagService {
 
         String lastUser = extractLastUserMessage(request.getMessages());
         messages.add(new UserMessage(lastUser));
-
         return messages;
     }
 
-    private List<Map<String, String>> buildOllamaMessages(String context, ChatRequest request) {
+    private List<Map<String, String>> buildOllamaMessages(String context, ChatRequest request, QueryIntent intent) {
         List<Map<String, String>> ollamaMessages = new ArrayList<>();
-        ollamaMessages.add(Map.of("role", "system", "content", SYSTEM_PROMPT));
+        String systemPrompt = (intent == QueryIntent.CHIT_CHAT) ? SYSTEM_PROMPT_CHIT_CHAT : SYSTEM_PROMPT;
+        ollamaMessages.add(Map.of("role", "system", "content", systemPrompt));
 
-        String contextMessage = "<context>\n" + sanitizeContext(context) + "\n</context>";
-        ollamaMessages.add(Map.of("role", "user", "content", contextMessage));
+        if (context != null && !context.isBlank()) {
+            String contextMessage = "<context>\n" + sanitizeContext(context) + "\n</context>";
+            ollamaMessages.add(Map.of("role", "user", "content", contextMessage));
+        }
 
         List<Message> history = buildHistoryMessages(request);
         for (Message m : history) {
@@ -127,7 +165,6 @@ public class RagService {
 
         String lastUser = extractLastUserMessage(request.getMessages());
         ollamaMessages.add(Map.of("role", "user", "content", lastUser));
-
         return ollamaMessages;
     }
 
@@ -164,18 +201,41 @@ public class RagService {
 
     public ChatResponse chat(ChatRequest request) {
         String lastUser = extractLastUserMessage(request.getMessages());
-        List<Document> retrieved = retrieveRelevant(lastUser);
-        String context = buildContext(retrieved);
+        QueryIntent intent = queryClassifier.classify(lastUser);
 
-        if ((retrieved.isEmpty() || context.length() < 100) && webSearchService.isEnabled()) {
-            String webResults = webSearchService.search(lastUser);
-            if (webResults != null && !webResults.isBlank()) {
-                context += "\n\nРезультаты веб-поиска:\n" + webResults;
+        String context = "";
+        boolean webSearchPerformed = false;
+
+        if (intent == QueryIntent.CHIT_CHAT) {
+            log.debug("Chit-chat intent, skipping retrieval");
+        } else if (intent == QueryIntent.CURRENT) {
+            if (webSearchService.isEnabled()) {
+                String webResults = webSearchService.search(lastUser);
+                if (webResults != null && !webResults.isBlank()) {
+                    context = "Результаты веб-поиска:\n" + webResults;
+                    webSearchPerformed = true;
+                }
+            }
+            if (context.isBlank()) {
+                context = buildContext(retrieveRelevant(lastUser));
+            }
+        } else {
+            List<Document> retrieved = retrieveRelevant(lastUser);
+            context = buildContext(retrieved);
+            if ((retrieved.isEmpty() || context.length() < 100) && webSearchService.isEnabled()) {
+                String webResults = webSearchService.search(lastUser);
+                if (webResults != null && !webResults.isBlank()) {
+                    context += "\n\nРезультаты веб-поиска:\n" + webResults;
+                }
             }
         }
 
+        String systemPrompt = (intent == QueryIntent.CHIT_CHAT) 
+                ? SYSTEM_PROMPT_CHIT_CHAT 
+                : SYSTEM_PROMPT;
+
         List<org.springframework.ai.chat.messages.Message> promptMessages =
-                buildPromptMessages(SYSTEM_PROMPT, context, request);
+                buildPromptMessages(systemPrompt, context, request);
 
         var aiResponse = chatModel.call(new Prompt(promptMessages));
         return mapToChatResponse(aiResponse, request.getModel());
@@ -183,17 +243,9 @@ public class RagService {
 
     public Flux<ServerSentEvent<String>> streamChat(ChatRequest request) {
         String lastUser = extractLastUserMessage(request.getMessages());
-        List<Document> retrieved = retrieveRelevant(lastUser);
-        String context = buildContext(retrieved);
+        QueryContext qc = prepareQuery(lastUser);
 
-        if ((retrieved.isEmpty() || context.length() < 100) && webSearchService.isEnabled()) {
-            String webResults = webSearchService.search(lastUser);
-            if (webResults != null && !webResults.isBlank()) {
-                context += "\n\nРезультаты веб-поиска:\n" + webResults;
-            }
-        }
-
-        List<Map<String, String>> ollamaMessages = buildOllamaMessages(context, request);
+        List<Map<String, String>> ollamaMessages = buildOllamaMessages(qc.context(), request, qc.intent());
 
         Map<String, Object> body = Map.of(
                 "model", request.getModel() != null ? request.getModel() : "minimax-m2.5:cloud",

@@ -1,10 +1,11 @@
 package com.rag.rag_service.config;
 
-import com.rag.rag_service.service.OllamaQuotaHandler;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.web.reactive.function.client.WebClient;
+
+import com.rag.rag_service.service.OllamaQuotaHandler;
 
 @Configuration
 public class WebClientConfig {
@@ -20,9 +21,7 @@ public class WebClientConfig {
         return WebClient.builder()
                 .baseUrl(ollamaBaseUrl)
                 .defaultHeader("Authorization", "Bearer " + apiKey)
-                .filter((request, next) -> {
-                    return next.exchange(request);
-                })
+                .filter(quotaHandler)
                 .build();
     }
 }

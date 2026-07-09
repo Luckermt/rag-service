@@ -50,6 +50,8 @@ dependencies {
     implementation 'de.l3s.boilerpipe:boilerpipe:1.1.0'
 
     implementation 'commons-validator:commons-validator:1.7'
+
+    implementation 'com.github.ben-manes.caffeine:caffeine'
 }
 
 dependencyManagement {

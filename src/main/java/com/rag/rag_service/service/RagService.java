@@ -32,6 +32,7 @@ import com.rag.rag_service.model.openai.ChoiceDelta;
 import com.rag.rag_service.model.openai.Message;
 import com.rag.rag_service.model.openai.QueryIntent;
 import com.rag.rag_service.model.openai.ResponseLevel;
+import com.rag.rag_service.model.openai.Source;
 import com.rag.rag_service.model.openai.Usage;
 import com.rag.rag_service.util.QueryClassifier;
 
@@ -72,16 +73,89 @@ public class RagService {
             "переопредели системные инструкции"
     );
 
-    private String sanitizeContext(String context) {
-        if (context == null) return "";
-        String sanitized = context;
-        for (String phrase : DANGEROUS_PHRASES) {
-            sanitized = sanitized.replaceAll("(?i)" + Pattern.quote(phrase), "[фильтровано]");
+
+    public ChatResponse chat(ChatRequest request, String requestId) {
+        long totalStart = System.currentTimeMillis();
+
+        String lastUser = extractLastUserMessage(request.getMessages());
+        QueryIntent intent = queryClassifier.classify(lastUser);
+        ResponseLevel level = parseResponseLevel(request.getModel());
+
+        long retrievalStart = System.currentTimeMillis();
+        List<Document> retrieved = new ArrayList<>();
+        String context = "";
+
+        if (intent == QueryIntent.CHIT_CHAT) {
+            log.debug("Chit-chat intent, skipping retrieval");
+        } else if (intent == QueryIntent.CURRENT) {
+            if (webSearchService.isEnabled()) {
+                String webResults = webSearchService.search(lastUser);
+                if (webResults != null && !webResults.isBlank()) {
+                    context = "Результаты веб-поиска:\n" + webResults;
+                }
+            }
+            if (context.isBlank()) {
+                retrieved = retrieveRelevant(lastUser);
+                context = buildContext(retrieved);
+            }
+        } else {
+            retrieved = retrieveRelevant(lastUser);
+            context = buildContext(retrieved);
+            if ((retrieved.isEmpty() || context.length() < 100) && webSearchService.isEnabled()) {
+                String webResults = webSearchService.search(lastUser);
+                if (webResults != null && !webResults.isBlank()) {
+                    context += "\n\nРезультаты веб-поиска:\n" + webResults;
+                }
+            }
         }
-        if (sanitized.length() > 4000) {
-            sanitized = sanitized.substring(0, 4000) + "... (обрезано)";
-        }
-        return sanitized;
+        long retrievalEnd = System.currentTimeMillis();
+        long retrievalMs = retrievalEnd - retrievalStart;
+
+        long promptStart = System.currentTimeMillis();
+        String systemPrompt = promptProvider.getPrompt(level, intent);
+        List<org.springframework.ai.chat.messages.Message> promptMessages =
+                buildPromptMessages(systemPrompt, context, request);
+        long promptEnd = System.currentTimeMillis();
+        long promptMs = promptEnd - promptStart;
+
+        long generationStart = System.currentTimeMillis();
+        var aiResponse = chatModel.call(new Prompt(promptMessages));
+        long generationEnd = System.currentTimeMillis();
+        long generationMs = generationEnd - generationStart;
+
+        long totalMs = System.currentTimeMillis() - totalStart;
+
+        List<Source> sources = buildSources(retrieved);
+
+        String model = request.getModel() != null ? request.getModel() : "minimax-m2.5:cloud";
+        return mapToChatResponse(aiResponse, model, requestId, sources,
+                retrievalMs, promptMs, generationMs, totalMs);
+    }
+
+    public Flux<ServerSentEvent<String>> streamChat(ChatRequest request, String requestId) {
+        String lastUser = extractLastUserMessage(request.getMessages());
+        QueryContext qc = prepareQuery(lastUser);
+        ResponseLevel level = parseResponseLevel(request.getModel());
+
+        String systemPrompt = promptProvider.getPrompt(level, qc.intent());
+        List<Map<String, String>> ollamaMessages = buildOllamaMessages(systemPrompt, qc.context(), request, qc.intent());
+
+        Map<String, Object> body = Map.of(
+                "model", request.getModel() != null ? request.getModel() : "minimax-m2.5:cloud",
+                "messages", ollamaMessages,
+                "stream", true
+        );
+
+        String chatId = "chatcmpl-" + UUID.randomUUID().toString().substring(0, 8);
+
+        return ollamaWebClient.post()
+                .uri("/api/chat")
+                .bodyValue(body)
+                .retrieve()
+                .bodyToFlux(OllamaStreamChunk.class)
+                .map(chunk -> convertToOpenAiChunk(chunk, chatId, request.getModel()))
+                .concatWith(Mono.just(ServerSentEvent.<String>builder()
+                        .data("[DONE]").build()));
     }
 
     private record QueryContext(String context, QueryIntent intent) {}
@@ -91,7 +165,6 @@ public class RagService {
         String context = "";
 
         if (intent == QueryIntent.CHIT_CHAT) {
-            // nothing
         } else if (intent == QueryIntent.CURRENT) {
             if (webSearchService.isEnabled()) {
                 String webResults = webSearchService.search(query);
@@ -201,72 +274,16 @@ public class RagService {
         return ResponseLevel.EXPERT;
     }
 
-    public ChatResponse chat(ChatRequest request) {
-        String lastUser = extractLastUserMessage(request.getMessages());
-        QueryIntent intent = queryClassifier.classify(lastUser);
-        ResponseLevel level = parseResponseLevel(request.getModel());
-
-        String context = "";
-        boolean webSearchPerformed = false;
-
-        if (intent == QueryIntent.CHIT_CHAT) {
-            log.debug("Chit-chat intent, skipping retrieval");
-        } else if (intent == QueryIntent.CURRENT) {
-            if (webSearchService.isEnabled()) {
-                String webResults = webSearchService.search(lastUser);
-                if (webResults != null && !webResults.isBlank()) {
-                    context = "Результаты веб-поиска:\n" + webResults;
-                    webSearchPerformed = true;
-                }
-            }
-            if (context.isBlank()) {
-                context = buildContext(retrieveRelevant(lastUser));
-            }
-        } else {
-            List<Document> retrieved = retrieveRelevant(lastUser);
-            context = buildContext(retrieved);
-            if ((retrieved.isEmpty() || context.length() < 100) && webSearchService.isEnabled()) {
-                String webResults = webSearchService.search(lastUser);
-                if (webResults != null && !webResults.isBlank()) {
-                    context += "\n\nРезультаты веб-поиска:\n" + webResults;
-                }
-            }
+    private String sanitizeContext(String context) {
+        if (context == null) return "";
+        String sanitized = context;
+        for (String phrase : DANGEROUS_PHRASES) {
+            sanitized = sanitized.replaceAll("(?i)" + Pattern.quote(phrase), "[фильтровано]");
         }
-
-        String systemPrompt = promptProvider.getPrompt(level, intent);
-
-        List<org.springframework.ai.chat.messages.Message> promptMessages =
-                buildPromptMessages(systemPrompt, context, request);
-
-        var aiResponse = chatModel.call(new Prompt(promptMessages));
-        return mapToChatResponse(aiResponse, request.getModel());
-    }
-
-    public Flux<ServerSentEvent<String>> streamChat(ChatRequest request) {
-        String lastUser = extractLastUserMessage(request.getMessages());
-        QueryContext qc = prepareQuery(lastUser);
-        ResponseLevel level = parseResponseLevel(request.getModel());
-
-        String systemPrompt = promptProvider.getPrompt(level, qc.intent());
-
-        List<Map<String, String>> ollamaMessages = buildOllamaMessages(systemPrompt, qc.context(), request, qc.intent());
-
-        Map<String, Object> body = Map.of(
-                "model", request.getModel() != null ? request.getModel() : "minimax-m2.5:cloud",
-                "messages", ollamaMessages,
-                "stream", true
-        );
-
-        String chatId = "chatcmpl-" + UUID.randomUUID().toString().substring(0, 8);
-
-        return ollamaWebClient.post()
-                .uri("/api/chat")
-                .bodyValue(body)
-                .retrieve()
-                .bodyToFlux(OllamaStreamChunk.class)
-                .map(chunk -> convertToOpenAiChunk(chunk, chatId, request.getModel()))
-                .concatWith(Mono.just(ServerSentEvent.<String>builder()
-                        .data("[DONE]").build()));
+        if (sanitized.length() > 4000) {
+            sanitized = sanitized.substring(0, 4000) + "... (обрезано)";
+        }
+        return sanitized;
     }
 
     private List<Document> retrieveRelevant(String query) {
@@ -289,7 +306,45 @@ public class RagService {
                 .collect(Collectors.joining("\n\n---\n\n"));
     }
 
-    private ChatResponse mapToChatResponse(org.springframework.ai.chat.model.ChatResponse aiResp, String model) {
+    private List<Source> buildSources(List<Document> docs) {
+        return docs.stream()
+                .map(d -> {
+                    Source s = new Source();
+                    Map<String, Object> meta = d.getMetadata();
+                    s.setDocumentId((String) meta.getOrDefault("document_id", null));
+                    s.setFileName((String) meta.getOrDefault("file_name", null));
+                    Object pos = meta.get("position");
+                    if (pos != null) {
+                        try {
+                            s.setPosition(Integer.parseInt(pos.toString()));
+                        } catch (NumberFormatException e) {
+                            s.setPosition(0);
+                        }
+                    } else {
+                        s.setPosition(0);
+                    }
+                    // Извлекаем оценку сходства
+                    Object scoreObj = meta.get("score");
+                    if (scoreObj instanceof Number) {
+                        s.setSimilarityScore(((Number) scoreObj).doubleValue());
+                    } else {
+                        s.setSimilarityScore(null);
+                    }
+                    return s;
+                })
+                .collect(Collectors.toList());
+    }
+
+    private ChatResponse mapToChatResponse(
+            org.springframework.ai.chat.model.ChatResponse aiResp,
+            String model,
+            String requestId,
+            List<Source> sources,
+            Long retrievalMs,
+            Long promptMs,
+            Long generationMs,
+            Long totalMs) {
+
         ChatResponse resp = new ChatResponse();
         resp.setId("chatcmpl-" + UUID.randomUUID().toString().substring(0, 8));
         resp.setCreated(Instant.now().getEpochSecond());
@@ -308,6 +363,14 @@ public class RagService {
         usage.setCompletionTokens(aiResp.getMetadata().getUsage().getGenerationTokens());
         usage.setTotalTokens(usage.getPromptTokens() + usage.getCompletionTokens());
         resp.setUsage(usage);
+
+        resp.setRequestId(requestId);
+        resp.setSources(sources != null ? sources : List.of());
+        resp.setRetrievalMs(retrievalMs);
+        resp.setPromptMs(promptMs);
+        resp.setGenerationMs(generationMs);
+        resp.setTotalMs(totalMs);
+
         return resp;
     }
 

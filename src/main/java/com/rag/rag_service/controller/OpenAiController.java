@@ -1,22 +1,20 @@
 package com.rag.rag_service.controller;
 
-import java.util.List;
-
-import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RestController;
-
 import com.rag.rag_service.model.openai.ChatRequest;
+import com.rag.rag_service.model.openai.ChatResponse;
 import com.rag.rag_service.model.openai.ModelInfo;
 import com.rag.rag_service.model.openai.ModelsResponse;
 import com.rag.rag_service.service.RagService;
-
 import lombok.RequiredArgsConstructor;
+import org.slf4j.MDC;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
+
+import java.util.List;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/v1")
@@ -32,14 +30,20 @@ public class OpenAiController {
 
     @PostMapping("/chat/completions")
     public ResponseEntity<?> chatCompletions(@RequestBody ChatRequest request) {
-        if (Boolean.TRUE.equals(request.getStream())) {
-            Flux<org.springframework.http.codec.ServerSentEvent<String>> stream =
-                    ragService.streamChat(request);
-            return ResponseEntity.ok()
-                    .contentType(MediaType.TEXT_EVENT_STREAM)
-                    .body(stream);
-        } else {
-            return ResponseEntity.ok(ragService.chat(request));
+        String requestId = UUID.randomUUID().toString();
+        try {
+            MDC.put("requestId", requestId);
+            if (Boolean.TRUE.equals(request.getStream())) {
+                Flux<ServerSentEvent<String>> stream = ragService.streamChat(request, requestId);
+                return ResponseEntity.ok()
+                        .contentType(MediaType.TEXT_EVENT_STREAM)
+                        .body(stream);
+            } else {
+                ChatResponse response = ragService.chat(request, requestId);
+                return ResponseEntity.ok(response);
+            }
+        } finally {
+            MDC.remove("requestId");
         }
     }
 }

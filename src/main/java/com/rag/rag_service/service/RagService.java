@@ -16,6 +16,7 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.ollama.OllamaChatModel;
+import org.springframework.ai.vectorstore.SearchRequest;
 import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.codec.ServerSentEvent;
@@ -56,6 +57,10 @@ public class RagService {
     private final QueryClassifier queryClassifier;
     private final SystemPromptProviderService promptProvider;
 
+    private final OllamaRetryService ollamaRetryService;
+    private final VectorStoreRetryService vectorStoreRetryService;
+    private final WebSearchRetryService webSearchRetryService;
+
     @Value("${rag.retrieval.top-k}")
     private int topK;
 
@@ -73,7 +78,6 @@ public class RagService {
             "переопредели системные инструкции"
     );
 
-
     public ChatResponse chat(ChatRequest request, String requestId) {
         long totalStart = System.currentTimeMillis();
 
@@ -89,7 +93,7 @@ public class RagService {
             log.debug("Chit-chat intent, skipping retrieval");
         } else if (intent == QueryIntent.CURRENT) {
             if (webSearchService.isEnabled()) {
-                String webResults = webSearchService.search(lastUser);
+                String webResults = webSearchRetryService.search(lastUser);
                 if (webResults != null && !webResults.isBlank()) {
                     context = "Результаты веб-поиска:\n" + webResults;
                 }
@@ -102,7 +106,7 @@ public class RagService {
             retrieved = retrieveRelevant(lastUser);
             context = buildContext(retrieved);
             if ((retrieved.isEmpty() || context.length() < 100) && webSearchService.isEnabled()) {
-                String webResults = webSearchService.search(lastUser);
+                String webResults = webSearchRetryService.search(lastUser);
                 if (webResults != null && !webResults.isBlank()) {
                     context += "\n\nРезультаты веб-поиска:\n" + webResults;
                 }
@@ -119,7 +123,7 @@ public class RagService {
         long promptMs = promptEnd - promptStart;
 
         long generationStart = System.currentTimeMillis();
-        var aiResponse = chatModel.call(new Prompt(promptMessages));
+        var aiResponse = ollamaRetryService.call(new Prompt(promptMessages));
         long generationEnd = System.currentTimeMillis();
         long generationMs = generationEnd - generationStart;
 
@@ -165,9 +169,10 @@ public class RagService {
         String context = "";
 
         if (intent == QueryIntent.CHIT_CHAT) {
+            // ничего
         } else if (intent == QueryIntent.CURRENT) {
             if (webSearchService.isEnabled()) {
-                String webResults = webSearchService.search(query);
+                String webResults = webSearchRetryService.search(query);
                 if (webResults != null && !webResults.isBlank()) {
                     context = "Результаты веб-поиска:\n" + webResults;
                 }
@@ -180,7 +185,7 @@ public class RagService {
             List<Document> retrieved = retrieveRelevant(query);
             context = buildContext(retrieved);
             if ((retrieved.isEmpty() || context.length() < 100) && webSearchService.isEnabled()) {
-                String webResults = webSearchService.search(query);
+                String webResults = webSearchRetryService.search(query);
                 if (webResults != null && !webResults.isBlank()) {
                     context += "\n\nРезультаты веб-поиска:\n" + webResults;
                 }
@@ -293,8 +298,8 @@ public class RagService {
                     .mapToObj(i -> (double) embArray[i])
                     .toList();
         });
-        return vectorStore.similaritySearch(
-                org.springframework.ai.vectorstore.SearchRequest.query(query)
+        return vectorStoreRetryService.similaritySearch(
+                SearchRequest.query(query)
                         .withTopK(topK)
                         .withSimilarityThreshold(similarityThreshold)
         );
@@ -323,7 +328,6 @@ public class RagService {
                     } else {
                         s.setPosition(0);
                     }
-                    // Извлекаем оценку сходства
                     Object scoreObj = meta.get("score");
                     if (scoreObj instanceof Number) {
                         s.setSimilarityScore(((Number) scoreObj).doubleValue());

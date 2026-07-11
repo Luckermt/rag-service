@@ -8,7 +8,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
 
 import org.springframework.ai.embedding.EmbeddingModel;
@@ -28,11 +27,8 @@ import com.rag.rag_service.repository.DocumentMetadataRepository;
 import com.rag.rag_service.util.ChunkUtil;
 
 import static io.qdrant.client.ConditionFactory.matchKeyword;
-import io.qdrant.client.QdrantClient;
 import io.qdrant.client.ValueFactory;
 import io.qdrant.client.grpc.Points;
-import io.qdrant.client.grpc.Points.DeletePoints;
-import io.qdrant.client.grpc.Points.PointsSelector;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 
@@ -44,7 +40,7 @@ public class DocumentService {
     private final DocumentMetadataRepository docRepo;
     private final DocumentParserFactory parserFactory;
     private final EmbeddingModel embeddingModel;
-    private final QdrantClient qdrantClient;
+    private final QdrantRetryService qdrantRetryService;
 
     @Qualifier("documentProcessingExecutor")
     private final java.util.concurrent.Executor asyncExecutor;
@@ -70,7 +66,7 @@ public class DocumentService {
     private final Map<UUID, Set<String>> documentChunksCache = new ConcurrentHashMap<>();
 
     public DocumentUploadResult upload(MultipartFile file) throws IOException {
-        log.info("Получен запрос на загрузку файла: {}, размер: {} байт", 
+        log.info("Получен запрос на загрузку файла: {}, размер: {} байт",
                 file.getOriginalFilename(), file.getSize());
         if (file.getSize() > maxFileSize) {
             log.warn("Файл {} превышает лимит {} байт", file.getOriginalFilename(), maxFileSize);
@@ -141,12 +137,12 @@ public class DocumentService {
                 points.add(point);
             }
 
-            qdrantClient.upsertAsync(
+            qdrantRetryService.upsert(
                     Points.UpsertPoints.newBuilder()
                             .setCollectionName(collectionName)
                             .addAllPoints(points)
                             .build()
-            ).get(10, TimeUnit.SECONDS);
+            );
 
             doc.setChunkCount(chunks.size());
             doc.setStatus(DocumentStatus.COMPLETED);
@@ -183,16 +179,16 @@ public class DocumentService {
 
         try {
             log.debug("Удаление точек Qdrant для документа {} из коллекции '{}'", id, collectionName);
-            qdrantClient.deleteAsync(
-                DeletePoints.newBuilder()
-                    .setCollectionName(collectionName)
-                    .setPoints(PointsSelector.newBuilder()
-                        .setFilter(Points.Filter.newBuilder()
-                            .addMust(matchKeyword("document_id", id.toString()))
-                            .build())
-                        .build())
-                    .build()
-            ).get(5, TimeUnit.SECONDS);
+            qdrantRetryService.delete(
+                    Points.DeletePoints.newBuilder()
+                            .setCollectionName(collectionName)
+                            .setPoints(Points.PointsSelector.newBuilder()
+                                    .setFilter(Points.Filter.newBuilder()
+                                            .addMust(matchKeyword("document_id", id.toString()))
+                                            .build())
+                                    .build())
+                            .build()
+            );
 
             log.info("Удалены Qdrant-точки для документа {}", id);
 
@@ -220,11 +216,11 @@ public class DocumentService {
     public Map<String, Object> getCacheStats() {
         var stats = embeddingCache.stats();
         return Map.of(
-            "size", embeddingCache.estimatedSize(),
-            "hitRate", stats.hitRate(),
-            "missRate", stats.missRate(),
-            "evictionCount", stats.evictionCount(),
-            "totalLoadTime", stats.totalLoadTime()
+                "size", embeddingCache.estimatedSize(),
+                "hitRate", stats.hitRate(),
+                "missRate", stats.missRate(),
+                "evictionCount", stats.evictionCount(),
+                "totalLoadTime", stats.totalLoadTime()
         );
     }
 }

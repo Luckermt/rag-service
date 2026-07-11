@@ -152,7 +152,6 @@ public class RagService {
         }
         long retrievalMs = System.currentTimeMillis() - retrievalStart;
 
-        // ---- ДОБАВЛЕНО: отказ от генерации при пустом контексте ----
         if (intent != QueryIntent.CHIT_CHAT && (context == null || context.isBlank())) {
             log.info("Context is empty, skipping LLM generation for intent {}", intent);
             long totalMs = System.currentTimeMillis() - totalStart;
@@ -178,7 +177,6 @@ public class RagService {
                 retrievalMs, promptMs, generationMs, totalMs);
     }
 
-    // ДОБАВЛЕНО: вспомогательный метод для ответа без генерации
     private ChatResponse createNoContextResponse(ChatRequest request, String requestId,
                                                   long retrievalMs, long totalMs) {
         ChatResponse resp = new ChatResponse();
@@ -213,7 +211,6 @@ public class RagService {
         QueryContext qc = prepareQuery(lastUser);
         ResponseLevel level = parseResponseLevel(request.getModel());
 
-        // ---- ДОБАВЛЕНО: отказ от генерации при пустом контексте ----
         if (qc.intent() != QueryIntent.CHIT_CHAT && (qc.context() == null || qc.context().isBlank())) {
             log.info("Stream: context is empty, skipping LLM generation for intent {}", qc.intent());
             String noDataMsg = "Недостаточно данных для ответа на ваш вопрос.";
@@ -269,7 +266,6 @@ public class RagService {
         String context = "";
 
         if (intent == QueryIntent.CHIT_CHAT) {
-            // ничего не делаем
         } else if (intent == QueryIntent.CURRENT) {
             if (webSearchService.isEnabled()) {
                 String webResults = webSearchRetryService.search(query);

@@ -2,6 +2,7 @@ package com.rag.rag_service.service;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -9,7 +10,6 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 import org.springframework.ai.chat.messages.AssistantMessage;
 import org.springframework.ai.chat.messages.SystemMessage;
@@ -40,6 +40,7 @@ import com.rag.rag_service.model.openai.Usage;
 import com.rag.rag_service.util.ExactTermGuard;
 import com.rag.rag_service.util.QueryClassifier;
 
+import io.qdrant.client.QdrantClient;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import reactor.core.publisher.Flux;
@@ -64,6 +65,7 @@ public class RagService {
     private final VectorStoreRetryService vectorStoreRetryService;
     private final WebSearchRetryService webSearchRetryService;
     private final ExactTermGuard exactTermGuard;
+    private final QdrantClient qdrantClient;
     @Value("${rag.retrieval.top-k}")
     private int topK;
 
@@ -197,7 +199,6 @@ public class RagService {
         String context = "";
 
         if (intent == QueryIntent.CHIT_CHAT) {
-            // ничего
         } else if (intent == QueryIntent.CURRENT) {
             if (webSearchService.isEnabled()) {
                 String webResults = webSearchRetryService.search(query);
@@ -318,29 +319,38 @@ public class RagService {
         }
         return sanitized;
     }
+    
+private List<Document> retrieveRelevant(String query) {
+    List<Document> semanticResults = vectorStoreRetryService.similaritySearch(
+            SearchRequest.query(query)
+                    .withTopK(topK)
+                    .withSimilarityThreshold(similarityThreshold)
+    );
+    log.info("Semantic results count: {}", semanticResults.size());
 
-    private List<Document> retrieveRelevant(String query) {
-        // 1. Получаем эмбеддинг запроса (кэшируем)
-        List<Double> queryEmbedding = cache.computeIfAbsent(query, () -> {
-            float[] embArray = embeddingModel.embed(query);
-            return IntStream.range(0, embArray.length)
-                    .mapToObj(i -> (double) embArray[i])
-                    .toList();
-        });
+    List<Document> fixed = semanticResults.stream()
+            .map(doc -> {
+                String content = doc.getContent();
+                if (content == null) {
+                    Object textObj = doc.getMetadata().get("text");
+                    if (textObj == null) textObj = doc.getMetadata().get("chunk_text");
+                    if (textObj != null) {
+                        return new Document(doc.getId(), textObj.toString(), doc.getMetadata());
+                    }
+                }
+                return doc;
+            })
+            .filter(doc -> doc.getContent() != null)
+            .collect(Collectors.toList());
+    log.info("After fixing null content: {}", fixed.size());
 
-        // 2. Выполняем семантический поиск
-        List<Document> semanticResults = vectorStoreRetryService.similaritySearch(
-                SearchRequest.query(query)
-                        .withTopK(topK)
-                        .withSimilarityThreshold(similarityThreshold)
-        );
+    List<Document> guarded = exactTermGuard.boostExactMatches(fixed, query);
+    log.info("After exact guard count: {}", guarded.size());
 
-        // 3. Применяем Exact‑term guard
-        List<Document> guarded = exactTermGuard.boostExactMatches(semanticResults, query);
-
-        // 4. Двухуровневый фильтр (реализован отдельно)
-        return applyTwoLevelFilter(guarded);
-    }
+    List<Document> filtered = applyTwoLevelFilter(guarded);
+    log.info("After two-level filter count: {}", filtered.size());
+    return filtered;
+}
 
     private String buildContext(List<Document> docs) {
         return docs.stream()
@@ -448,10 +458,10 @@ public class RagService {
     }
 
     public Map<String, Object> debugChat(ChatRequest request) {
-    String requestId = UUID.randomUUID().toString();
+        try{
+            String requestId = UUID.randomUUID().toString();
     long totalStart = System.currentTimeMillis();
 
-    // Выполняем все шаги, но собираем промежуточные данные
     String lastUser = extractLastUserMessage(request.getMessages());
     QueryIntent intent = queryClassifier.classify(lastUser);
     ResponseLevel level = parseResponseLevel(request.getModel());
@@ -473,11 +483,11 @@ public class RagService {
 
     long totalMs = System.currentTimeMillis() - totalStart;
 
-    // Собираем информацию о найденных источниках с их оценками
     List<Map<String, Object>> sourcesInfo = retrieved.stream()
             .map(doc -> {
                 Map<String, Object> info = new HashMap<>(doc.getMetadata());
-                info.put("content_preview", doc.getContent().substring(0, Math.min(100, doc.getContent().length())));
+                String content = doc.getContent();
+                info.put("content_preview", content != null ? content.substring(0, Math.min(100, content.length())) : "");
                 return info;
             })
             .collect(Collectors.toList());
@@ -494,6 +504,11 @@ public class RagService {
             "final_answer", aiResponse.getResult().getOutput().getContent()
     );
     return result;
+        } catch (Exception e) {
+        e.printStackTrace();
+        return Map.of("error", e.getMessage(), "stack", Arrays.toString(e.getStackTrace()));
+    }
+    
 }
     @lombok.Data
     private static class OllamaStreamChunk {

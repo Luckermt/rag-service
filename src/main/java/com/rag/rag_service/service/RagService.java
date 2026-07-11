@@ -54,7 +54,6 @@ public class RagService {
     private final OllamaChatModel chatModel;
     private final EmbeddingModel embeddingModel;
     private final VectorStore vectorStore;
-    private final EmbeddingCacheService cache;
     private final WebSearchService webSearchService;
     private final WebClient ollamaWebClient;
     private final ObjectMapper objectMapper;

@@ -35,7 +35,6 @@ import com.rag.rag_service.model.document.DocumentUploadResult;
 import com.rag.rag_service.parser.DocumentParserFactory;
 import com.rag.rag_service.repository.DocumentMetadataRepository;
 import com.rag.rag_service.service.DocumentService;
-import com.rag.rag_service.service.EmbeddingCacheService;
 
 import io.qdrant.client.QdrantClient;
 import io.qdrant.client.grpc.Points;
@@ -54,9 +53,6 @@ class DocumentServiceTest {
 
     @Mock
     private VectorStore vectorStore;
-
-    @Mock
-    private EmbeddingCacheService cache;
 
     @Mock
     private QdrantClient qdrantClient;
@@ -95,9 +91,6 @@ class DocumentServiceTest {
 
         float[] embedding = {0.1f, 0.2f};
         when(embeddingModel.embed(anyString())).thenReturn(embedding);
-        when(cache.computeIfAbsent(anyString(), any())).thenAnswer(inv -> {
-            return List.of(0.1, 0.2);
-        });
 
         DocumentUploadResult result = documentService.upload(file);
 

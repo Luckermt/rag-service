@@ -1,24 +1,22 @@
 package com.rag.rag_service.service;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.stream.IntStream;
 
-import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.document.Document;
+import org.springframework.ai.vectorstore.VectorStore;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
 
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
 import com.rag.rag_service.model.document.DocumentMetadata;
 import com.rag.rag_service.model.document.DocumentStatus;
 import com.rag.rag_service.model.document.DocumentUploadResult;
@@ -27,7 +25,6 @@ import com.rag.rag_service.repository.DocumentMetadataRepository;
 import com.rag.rag_service.util.ChunkUtil;
 
 import static io.qdrant.client.ConditionFactory.matchKeyword;
-import io.qdrant.client.ValueFactory;
 import io.qdrant.client.grpc.Points;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -39,7 +36,7 @@ public class DocumentService {
 
     private final DocumentMetadataRepository docRepo;
     private final DocumentParserFactory parserFactory;
-    private final EmbeddingModel embeddingModel;
+    private final VectorStore vectorStore;
     private final QdrantRetryService qdrantRetryService;
 
     @Qualifier("documentProcessingExecutor")
@@ -56,14 +53,6 @@ public class DocumentService {
 
     @Value("${rag.documents.max-file-size}")
     private long maxFileSize;
-
-    private final Cache<String, List<Double>> embeddingCache = Caffeine.newBuilder()
-            .maximumSize(10_000)
-            .expireAfterAccess(java.time.Duration.ofHours(1))
-            .recordStats()
-            .build();
-
-    private final Map<UUID, Set<String>> documentChunksCache = new ConcurrentHashMap<>();
 
     public DocumentUploadResult upload(MultipartFile file) throws IOException {
         log.info("Получен запрос на загрузку файла: {}, размер: {} байт",
@@ -97,64 +86,6 @@ public class DocumentService {
         return new DocumentUploadResult(id.toString(), fileName, DocumentStatus.PROCESSING.name(), 0);
     }
 
-    private void processDocument(DocumentMetadata doc, byte[] content, String fileName) {
-        try {
-            String text = parserFactory.getParser(fileName).parse(
-                    new java.io.ByteArrayInputStream(content));
-            List<String> chunks = ChunkUtil.chunk(text, chunkSize, overlap);
-
-            documentChunksCache.computeIfAbsent(doc.getId(), k -> ConcurrentHashMap.newKeySet())
-                    .addAll(chunks);
-
-            List<Points.PointStruct> points = new ArrayList<>();
-            for (int i = 0; i < chunks.size(); i++) {
-                String chunk = chunks.get(i);
-
-                List<Double> embedding = embeddingCache.get(chunk, key -> {
-                    float[] embArray = embeddingModel.embed(key);
-                    return IntStream.range(0, embArray.length)
-                            .mapToObj(k -> (double) embArray[k])
-                            .toList();
-                });
-
-                List<Float> vector = embedding.stream().map(Double::floatValue).toList();
-
-                String uniqueId = doc.getId().toString() + "_" + i;
-                UUID pointUuid = UUID.nameUUIDFromBytes(uniqueId.getBytes());
-                String pointId = pointUuid.toString();
-
-                Points.PointStruct point = Points.PointStruct.newBuilder()
-                        .setId(Points.PointId.newBuilder().setUuid(pointId).build())
-                        .setVectors(Points.Vectors.newBuilder()
-                                .setVector(Points.Vector.newBuilder().addAllData(vector).build())
-                                .build())
-                        .putPayload("file_name", ValueFactory.value(fileName))
-                        .putPayload("document_id", ValueFactory.value(doc.getId().toString()))
-                        .putPayload("position", ValueFactory.value(String.valueOf(i)))
-                        .putPayload("chunk_text", ValueFactory.value(chunk))
-                        .build();
-
-                points.add(point);
-            }
-
-            qdrantRetryService.upsert(
-                    Points.UpsertPoints.newBuilder()
-                            .setCollectionName(collectionName)
-                            .addAllPoints(points)
-                            .build()
-            );
-
-            doc.setChunkCount(chunks.size());
-            doc.setStatus(DocumentStatus.COMPLETED);
-            docRepo.save(doc);
-            log.info("Документ {} успешно обработан, {} чанков", doc.getId(), chunks.size());
-
-        } catch (Exception e) {
-            log.error("Ошибка обработки документа {}", doc.getId(), e);
-            updateStatus(doc.getId(), DocumentStatus.FAILED);
-        }
-    }
-
     @Transactional
     public void updateStatus(UUID id, DocumentStatus status) {
         docRepo.findById(id).ifPresent(doc -> {
@@ -178,7 +109,6 @@ public class DocumentService {
         }
 
         try {
-            log.debug("Удаление точек Qdrant для документа {} из коллекции '{}'", id, collectionName);
             qdrantRetryService.delete(
                     Points.DeletePoints.newBuilder()
                             .setCollectionName(collectionName)
@@ -189,20 +119,7 @@ public class DocumentService {
                                     .build())
                             .build()
             );
-
             log.info("Удалены Qdrant-точки для документа {}", id);
-
-            Set<String> chunkTexts = documentChunksCache.remove(id);
-            if (chunkTexts != null && !chunkTexts.isEmpty()) {
-                int invalidated = 0;
-                for (String text : chunkTexts) {
-                    embeddingCache.invalidate(text);
-                    invalidated++;
-                }
-                log.info("Инвалидировано {} записей кэша для документа {}", invalidated, id);
-            } else {
-                log.debug("Нет чанков в кэше для документа {}", id);
-            }
 
             docRepo.deleteById(id);
             log.info("Документ {} удалён из БД", id);
@@ -213,14 +130,36 @@ public class DocumentService {
         }
     }
 
-    public Map<String, Object> getCacheStats() {
-        var stats = embeddingCache.stats();
-        return Map.of(
-                "size", embeddingCache.estimatedSize(),
-                "hitRate", stats.hitRate(),
-                "missRate", stats.missRate(),
-                "evictionCount", stats.evictionCount(),
-                "totalLoadTime", stats.totalLoadTime()
-        );
+    private void processDocument(DocumentMetadata doc, byte[] content, String fileName) {
+        try {
+            String text = parserFactory.getParser(fileName)
+                    .parse(new ByteArrayInputStream(content));
+
+            List<String> chunks = ChunkUtil.chunk(text, chunkSize, overlap);
+
+            List<Document> documents = new ArrayList<>();
+            for (int i = 0; i < chunks.size(); i++) {
+                String chunk = chunks.get(i);
+                Map<String, Object> metadata = new HashMap<>();
+                metadata.put("file_name", fileName);
+                metadata.put("document_id", doc.getId().toString());
+                metadata.put("position", i);
+
+                Document document = new Document(chunk, metadata);
+                documents.add(document);
+            }
+
+            vectorStore.add(documents);
+
+            doc.setChunkCount(chunks.size());
+            doc.setStatus(DocumentStatus.COMPLETED);
+            docRepo.save(doc);
+
+            log.info("Документ {} успешно обработан, {} чанков", doc.getId(), chunks.size());
+
+        } catch (Exception e) {
+            log.error("Ошибка обработки документа {}", doc.getId(), e);
+            updateStatus(doc.getId(), DocumentStatus.FAILED);
+        }
     }
 }

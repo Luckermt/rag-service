@@ -52,6 +52,12 @@ dependencies {
     implementation 'commons-validator:commons-validator:1.7'
 
     implementation 'com.github.ben-manes.caffeine:caffeine'
+    implementation 'org.springframework.boot:spring-boot-starter-aop'
+    implementation 'io.github.resilience4j:resilience4j-spring-boot3:2.2.0'
+    implementation 'io.github.resilience4j:resilience4j-retry'
+    implementation 'io.github.resilience4j:resilience4j-circuitbreaker'
+    implementation 'io.github.resilience4j:resilience4j-timelimiter'
+    implementation 'io.projectreactor.netty:reactor-netty'
 }
 
 dependencyManagement {

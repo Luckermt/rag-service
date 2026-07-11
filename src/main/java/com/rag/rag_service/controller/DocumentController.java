@@ -1,22 +1,31 @@
 package com.rag.rag_service.controller;
 
-import com.rag.rag_service.model.document.DocumentMetadata;
-import com.rag.rag_service.model.document.DocumentUploadResult;
-import com.rag.rag_service.service.DocumentService;
-import com.rag.rag_service.util.SsrfProtection;
-import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.*;
-import org.springframework.web.multipart.MultipartFile;
-import org.springframework.web.reactive.function.client.WebClient;
-
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
+
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.reactive.function.client.WebClient;
+
+import com.rag.rag_service.model.document.DocumentMetadata;
+import com.rag.rag_service.model.document.DocumentUploadResult;
+import com.rag.rag_service.service.DocumentService;
+import com.rag.rag_service.util.SsrfProtection;
+
+import lombok.RequiredArgsConstructor;
 
 @RestController
 @RequestMapping("/api/documents")
@@ -25,6 +34,9 @@ public class DocumentController {
 
     private final DocumentService documentService;
     private final SsrfProtection ssrfProtection;
+
+    @Qualifier("downloadWebClient")
+    private final WebClient downloadWebClient;
 
     @Value("${rag.url-download.timeout:30s}")
     private Duration downloadTimeout;
@@ -59,11 +71,7 @@ public class DocumentController {
     }
 
     private byte[] downloadContent(String urlString) throws IOException {
-        WebClient client = WebClient.builder()
-                .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize((int) maxDownloadSize))
-                .build();
-
-        return client.get()
+        return downloadWebClient.get()
                 .uri(urlString)
                 .header("User-Agent", "RAG-Service")
                 .retrieve()

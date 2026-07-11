@@ -49,3 +49,55 @@ rag:
 logging:
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss} [%X{requestId}] %-5level %logger{36} - %msg%n"
+
+webclient:
+  connect-timeout: 5000      # 5 сек
+  read-timeout: 30000        # 30 сек
+
+# Resilience4j
+resilience4j:
+  retry:
+    instances:
+      qdrantRetry:
+        maxAttempts: 3
+        waitDuration: 1s
+        retryExceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+          - io.grpc.StatusRuntimeException
+        ignoreExceptions:
+          - org.springframework.dao.DataIntegrityViolationException
+      ollamaRetry:
+        maxAttempts: 3
+        waitDuration: 2s
+        exponentialBackoffMultiplier: 2
+        retryExceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+      webSearchRetry:
+        maxAttempts: 2
+        waitDuration: 1s
+        retryExceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+
+  circuitbreaker:
+    instances:
+      ollamaCB:
+        slidingWindowSize: 10
+        failureRateThreshold: 50
+        waitDurationInOpenState: 30s
+        permittedNumberOfCallsInHalfOpenState: 3
+        recordExceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+          - com.rag.rag_service.exception.QuotaExceededException
+
+  timelimiter:
+    instances:
+      ollamaTL:
+        timeoutDuration: 60s
+      qdrantTL:
+        timeoutDuration: 30s
+      webSearchTL:
+        timeoutDuration: 10s

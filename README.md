@@ -1,6 +1,6 @@
 # RAG Service
 
-Java-сервис, реализующий RAG-систему (Retrieval-Augmented Generation) с OpenAI-совместимым REST API.
+Java-сервис, реализующий RAG-систему (Retrieval-Augmented Generation) с OpenAI-совместимым REST API.  
 Подключается к любому клиенту с поддержкой формата OpenAI (Open WebUI, LibreChat и т.д.) без модификаций.
 
 ## Стек
@@ -11,6 +11,8 @@ Java-сервис, реализующий RAG-систему (Retrieval-Augmente
 - **Ollama Cloud** — LLM (`minimax-m2.5:cloud`) и эмбеддинги (`nomic-embed-text:v1.5`)
 - **SearXNG** — веб-поиск (fallback)
 - **Apache PDFBox / Apache POI / commonmark-java** — парсеры документов
+- **Jsoup + Boilerpipe** — парсинг HTML
+- **Resilience4j** — повторы, размыкатель цепи, таймауты
 - **springdoc-openapi** — Swagger UI
 
 ## Архитектура
@@ -23,22 +25,46 @@ Controller ──> Service ──> Repository
               │           ├─> ChatModel (Ollama)
               │           └─> DocumentMetadataRepository (H2)
               │
-              └─> WebSearchService (SearXNG)
+              ├─> WebSearchService (SearXNG)
+              ├─> QueryClassifier (определение интента)
+              ├─> ExactTermGuard (буквальный поиск технических токенов)
+              ├─> Two‑level Filter (сильные и пограничные источники)
+              └─> SystemPromptProvider (выбор стиля ответа)
 ```
 
 ## Структура проекта
 
 ```
 src/main/java/com/rag/rag_service/
-├── controller/        REST-эндпоинты (/v1/* и /api/documents/*)
-├── service/           RagService, DocumentService, EmbeddingCacheService,
-│                      WebSearchService, OllamaQuotaHandler
-├── parser/            TxtParser, MarkdownParser, PdfParser, DocxParser
-├── config/            AsyncConfig, QdrantConfig, WebClientConfig, OpenApiConfig
-├── model/             OpenAI DTO и DTO документов
-├── repository/        DocumentMetadataRepository
-├── exception/         QuotaExceededException, GlobalExceptionHandler
-└── util/              ChunkUtil
+├── controller/           REST-эндпоинты
+│   ├── OpenAiController      (/v1/*)
+│   ├── DocumentController    (/api/documents/*)
+│   └── DebugController       (/rag/debug)
+├── service/              Бизнес-логика
+│   ├── RagService            основной RAG-пайплайн
+│   ├── DocumentService       загрузка/удаление документов
+│   ├── WebSearchService      интеграция с SearXNG
+│   ├── OllamaQuotaHandler    перехват 429 от Ollama
+│   ├── SystemPromptProviderService  выбор промпта по стилю
+│   ├── OllamaRetryService    повторы/размыкатель для Ollama
+│   ├── QdrantRetryService    повторы для Qdrant
+│   ├── VectorStoreRetryService
+│   └── WebSearchRetryService
+├── parser/               Парсеры документов
+│   ├── TxtParser, MarkdownParser, PdfParser, DocxParser, HtmlParser
+│   └── DocumentParserFactory
+├── config/               Конфигурации
+│   ├── AsyncConfig, QdrantConfig, WebClientConfig, OpenApiConfig
+│   └── Resilience4jConfig
+├── model/                DTO (OpenAI, документы)
+├── repository/           DocumentMetadataRepository
+├── exception/            QuotaExceededException, GlobalExceptionHandler
+└── util/
+    ├── ChunkUtil             разбиение по границам
+    ├── QueryClassifier       классификация запроса
+    ├── ExactTermGuard        бустинг точных технических терминов
+    ├── SsrfProtection        защита от SSRF при загрузке по URL
+    └── (EmbeddingCacheService удалён)
 ```
 
 ## Требования
@@ -52,7 +78,7 @@ src/main/java/com/rag/rag_service/
 | Переменная | Назначение | Обязательная |
 |---|---|---|
 | `OLLAMA_API_KEY` | API-ключ Ollama Cloud | да |
-| `QDRANT_API_KEY` | API-ключ Qdrant| да |
+| `QDRANT_API_KEY` | API-ключ Qdrant | да |
 
 ## Запуск
 
@@ -118,7 +144,24 @@ curl http://localhost:8080/v1/models
 
 Генерация ответа с использованием RAG. Поддерживает `stream=true` (SSE) и `stream=false`.
 
-**Без потоковой передачи:**
+**Параметры запроса:**
+
+- `model` – имя модели. Можно указать суффиксы для смены стиля:
+  - `minimax-m2.5:cloud` – экспертный стиль (по умолчанию)
+  - `minimax-m2.5:cloud-eli5` – упрощённый (объяснение простыми словами)
+  - `minimax-m2.5:cloud-novice` – для новичков (максимально доступно)
+- `messages` – массив сообщений с ролями `user` / `assistant` (поддерживается история диалога).
+- `stream` – `true` или `false` (по умолчанию `false`).
+- `temperature` – (опционально) температура генерации.
+- `max_tokens` – (опционально) максимальное число токенов.
+
+**Особенности:**
+
+- Если запрос классифицирован как `CHIT_CHAT` (приветствие, благодарность), поиск в базе не выполняется, LLM отвечает напрямую.
+- Для `FACTUAL` и `CURRENT` выполняется поиск по Qdrant и, при недостатке релевантных чанков, веб-поиск (если включён).
+- Если после всех попыток контекст пуст, LLM **не вызывается**, а возвращается ответ: *"Недостаточно данных для ответа на ваш вопрос."* с `generation_ms = 0`. Это экономит квоту и предотвращает галлюцинации.
+
+**Пример без стриминга:**
 
 ```bash
 curl http://localhost:8080/v1/chat/completions \
@@ -130,24 +173,27 @@ curl http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-**С потоковой передачей (SSE):**
+**Пример со стримингом:**
 
 ```bash
 curl -N http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "minimax-m2.5:cloud",
-    "messages": [{"role": "user", "content": "Что такое Spring Boot?"}],
+    "model": "minimax-m2.5:cloud-eli5",
+    "messages": [{"role": "user", "content": "Объясни, как работает REST"}],
     "stream": true
   }'
 ```
 
-**Обязательные поля запроса:** `model`, `messages[]` (с `role` и `content`).
-**Опциональные:** `stream`, `temperature`, `max_tokens`.
+**Ответ (синхронный)** содержит дополнительные поля:
+
+- `requestId` – уникальный идентификатор запроса (дублируется в логах).
+- `sources` – список использованных фрагментов с `documentId`, `fileName`, `position`, `similarityScore`.
+- `retrieval_ms`, `prompt_ms`, `generation_ms`, `total_ms` – временные метрики.
 
 ### POST /api/documents/upload
 
-Загрузка документа (PDF, DOCX, Markdown, TXT). Максимальный размер файла — 50 MB.
+Загрузка документа (PDF, DOCX, Markdown, TXT, HTML). Максимальный размер — 50 МБ.
 
 ```bash
 curl -F "file=@./guide.pdf" http://localhost:8080/api/documents/upload
@@ -166,6 +212,16 @@ curl -F "file=@./guide.pdf" http://localhost:8080/api/documents/upload
 
 Обработка выполняется асинхронно; статус можно проверить через `GET /api/documents`.
 
+### POST /api/documents/upload-from-url
+
+Загрузка документа по URL (с защитой от SSRF).
+
+```bash
+curl -X POST "http://localhost:8080/api/documents/upload-from-url?url=https://example.com/doc.html"
+```
+
+Поддерживаются те же форматы, что и при прямой загрузке.
+
 ### GET /api/documents
 
 Список всех загруженных документов с их метаданными и статусами.
@@ -176,31 +232,48 @@ curl http://localhost:8080/api/documents
 
 ### DELETE /api/documents/{id}
 
-Удаление документа и всех его чанков из векторной БД.
+Удаление документа и всех его чанков из векторной БД (сначала Qdrant, затем запись в БД).
 
 ```bash
 curl -X DELETE http://localhost:8080/api/documents/550e8400-e29b-41d4-a716-446655440000
 ```
 
+### POST /rag/debug
+
+Диагностический эндпоинт, возвращающий детализированный JSON-ответ без вызова LLM (если контекст пуст). Полезен для отладки и прозрачности.
+
+```bash
+curl -X POST http://localhost:8080/rag/debug \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "minimax-m2.5:cloud",
+    "messages": [{"role": "user", "content": "На основе контекста напиши общую информацию о Spring Boot"}]
+  }'
+```
+
+Ответ содержит `sources` с полной информацией, все тайминги и финальный ответ (или сообщение о недостаточности данных).
+
 ## Как работает RAG-пайплайн
 
 1. Пользователь отправляет запрос через OpenAI-совместимый клиент.
-2. Запрос векторизуется через `nomic-embed-text:v1.5` (с кэшированием).
-3. В Qdrant ищутся top-5 наиболее релевантных чанков (порог сходства — 0.7).
-4. Если релевантных чанков нет — выполняется веб-поиск через SearXNG.
-5. Системный промпт формируется по шаблону:
-
-   ```
-   Ты — помощник, отвечающий на основе контекста.
-   Отвечай только на основе контекста. Если ответа нет — скажи об этом.
-   Не придумывай факты. Указывай источник (имя файла), если возможно.
-
-   Контекст:
-   <чанки через \n\n---\n\n>
-   ```
-
-6. LLM (`minimax-m2.5:cloud`) генерирует ответ.
-7. Ответ возвращается клиенту в формате OpenAI.
+2. **Классификация запроса** (`QueryClassifier`):
+   - `CHIT_CHAT` – приветствия, благодарности → поиск пропускается.
+   - `CURRENT` – запросы с упоминанием времени (сегодня, новости) → приоритет веб-поиску.
+   - `FACTUAL` – остальные запросы → поиск в Qdrant.
+3. **Поиск в Qdrant** (для `FACTUAL` и `CURRENT` при отсутствии веб-результатов):
+   - Эмбеддинг запроса (через `nomic-embed-text:v1.5`).
+   - Возврат `topK` чанков с порогом `similarityThreshold`.
+   - **Exact‑term guard** – извлечение технических токенов (пути, имена файлов, `CONSTANT_CASE`, `CamelCase`) и бустинг чанков, содержащих эти токены (устанавливается `score = 1.0`).
+   - **Двухуровневый фильтр** – проверка наличия хотя бы одного чанка с `score >= strongThreshold` и суммарной оценки всех чанков `>= minTotalScore`. Если условие не выполнено – поиск считается неудачным.
+4. **Веб-поиск (fallback)**: если поиск в Qdrant не дал результатов (пустой список или общий контекст < 100 символов) и `web-search.enabled=true`, выполняется запрос к SearXNG. Результаты добавляются в контекст.
+5. **Проверка наличия контекста**:
+   - Если после всех шагов контекст пуст (и запрос не `CHIT_CHAT`) – LLM **не вызывается**, возвращается сообщение *"Недостаточно данных для ответа на ваш вопрос."* с `generation_ms = 0`.
+6. **Формирование промпта**:
+   - Системный промпт выбирается на основе стиля ответа (определяется по суффиксу модели).
+   - Контекст помещается в тег `<context>` и экранируется (удаляются опасные фразы, ограничивается длина).
+   - Добавляется история диалога (до `max-history-messages` сообщений).
+7. **Генерация ответа** через Ollama (`minimax-m2.5:cloud`) с повторными попытками и размыкателем цепи (Resilience4j).
+8. **Ответ** возвращается в формате OpenAI с дополнительными полями (`sources`, тайминги, `requestId`).
 
 ## Конфигурация
 
@@ -209,16 +282,20 @@ curl -X DELETE http://localhost:8080/api/documents/550e8400-e29b-41d4-a716-44665
 ```yaml
 rag:
   chunk:
-    size: 1000           # размер чанка в символах
-    overlap: 200         # перекрытие между соседними чанками
+    size: 1000                     # размер чанка в символах
+    overlap: 200                   # перекрытие между соседними чанками
   retrieval:
-    top-k: 5             # количество возвращаемых чанков
-    similarity-threshold: 0.7   # порог косинусного сходства
+    top-k: 5
+    similarity-threshold: 0.0      # порог (0.0 – отключён, т.к. используется двухуровневый фильтр)
+    strong-threshold: 0.8          # минимальная оценка для "сильного" чанка
+    min-total-score: 1.2           # минимальная сумма оценок всех чанков
   documents:
-    max-file-size: 52428800   # 50 MB
+    max-file-size: 52428800        # 50 МБ
   web-search:
     enabled: true
     searxng-url: http://searxng:8080
+  dialog:
+    max-history-messages: 20       # максимальное число сообщений в истории
 ```
 
 ## Квоты Ollama

@@ -144,7 +144,8 @@ public class DocumentService {
                 metadata.put("file_name", fileName);
                 metadata.put("document_id", doc.getId().toString());
                 metadata.put("position", i);
-
+                log.debug("Adding chunk with metadata: {}", metadata);
+                
                 Document document = new Document(chunk, metadata);
                 documents.add(document);
             }

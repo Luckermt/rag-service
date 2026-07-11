@@ -31,6 +31,7 @@ spring:
     hibernate:
       ddl-auto: update
     show-sql: false
+  
 
 rag:
   chunk:
@@ -38,9 +39,9 @@ rag:
     overlap: 200
   retrieval:
     top-k: 5
-    similarity-threshold: 0.7
-    strong-threshold: 0.8
-    min-total-score: 1.2
+    similarity-threshold: 0.0
+    strong-threshold: 0.0
+    min-total-score: 0.0
   documents:
     max-file-size: 52428800   # 50 MB
   web-search:
@@ -103,3 +104,4 @@ resilience4j:
         timeoutDuration: 30s
       webSearchTL:
         timeoutDuration: 10s
+  

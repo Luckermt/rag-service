@@ -12,6 +12,9 @@ import java.util.stream.Collectors;
 import org.springframework.ai.document.Document;
 import org.springframework.stereotype.Component;
 
+import lombok.extern.slf4j.Slf4j;
+
+@Slf4j
 @Component
 public class ExactTermGuard {
 
@@ -45,6 +48,11 @@ public class ExactTermGuard {
 
     public List<Document> boostExactMatches(List<Document> documents, String query) {
     Set<String> tokens = extractTechnicalTokens(query);
+    log.debug("ExactTermGuard: extracted tokens from '{}': {}", query, tokens);
+    if (tokens.isEmpty()) {
+        log.debug("ExactTermGuard: no tokens, returning original list");
+        return documents;
+    }
     if (tokens.isEmpty()) {
         return documents;
     }
@@ -66,7 +74,11 @@ public class ExactTermGuard {
             others.add(doc);
         }
     }
-
+    if (!exactMatches.isEmpty()) {
+        log.info("ExactTermGuard: boosted {} documents with exact matches", exactMatches.size());
+    } else {
+        log.debug("ExactTermGuard: no exact matches found");
+    }
     if (!exactMatches.isEmpty()) {
         exactMatches.addAll(others);
         return exactMatches;

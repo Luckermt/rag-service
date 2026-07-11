@@ -82,7 +82,10 @@ public class RagService {
     private double minTotalScore;
 
     private List<Document> applyTwoLevelFilter(List<Document> documents) {
-        if (documents.isEmpty()) return documents;
+        if (documents.isEmpty()) {
+            log.debug("applyTwoLevelFilter: empty input");
+            return documents;
+        }
 
         boolean hasStrong = false;
         double totalScore = 0.0;
@@ -92,10 +95,14 @@ public class RagService {
             double score = (scoreObj instanceof Number) ? ((Number) scoreObj).doubleValue() : 0.0;
             if (score >= strongThreshold) hasStrong = true;
             totalScore += score;
+            log.debug("  Document score: {}, hasStrong so far: {}", score, hasStrong);
         }
 
+        log.debug("applyTwoLevelFilter: hasStrong={}, totalScore={}, strongThreshold={}, minTotalScore={}",
+                hasStrong, totalScore, strongThreshold, minTotalScore);
+
         if (!hasStrong || totalScore < minTotalScore) {
-            log.debug("Filtered out due to weak scores: strong={}, total={}", hasStrong, totalScore);
+            log.warn("Filtered out: hasStrong={}, totalScore={}", hasStrong, totalScore);
             return Collections.emptyList();
         }
         return documents;
@@ -321,12 +328,20 @@ public class RagService {
     }
     
 private List<Document> retrieveRelevant(String query) {
+    log.info("=== RETRIEVAL START for query: '{}' ===", query);
+
     List<Document> semanticResults = vectorStoreRetryService.similaritySearch(
             SearchRequest.query(query)
                     .withTopK(topK)
                     .withSimilarityThreshold(similarityThreshold)
     );
     log.info("Semantic results count: {}", semanticResults.size());
+    for (int i = 0; i < semanticResults.size(); i++) {
+        Document doc = semanticResults.get(i);
+        log.debug("  Semantic[{}]: score={}, content_preview='{}'",
+                i, doc.getMetadata().get("score"),
+                doc.getContent() != null ? doc.getContent().substring(0, Math.min(50, doc.getContent().length())) : "null");
+    }
 
     List<Document> fixed = semanticResults.stream()
             .map(doc -> {
@@ -346,9 +361,20 @@ private List<Document> retrieveRelevant(String query) {
 
     List<Document> guarded = exactTermGuard.boostExactMatches(fixed, query);
     log.info("After exact guard count: {}", guarded.size());
+    for (int i = 0; i < guarded.size(); i++) {
+        Document doc = guarded.get(i);
+        log.debug("  Guarded[{}]: score={}, exact_match={}, content_preview='{}'",
+                i, doc.getMetadata().get("score"), doc.getMetadata().get("exact_match"),
+                doc.getContent() != null ? doc.getContent().substring(0, Math.min(50, doc.getContent().length())) : "null");
+    }
 
     List<Document> filtered = applyTwoLevelFilter(guarded);
     log.info("After two-level filter count: {}", filtered.size());
+    if (filtered.isEmpty()) {
+        log.warn("No documents passed two-level filter. Check scores and thresholds.");
+    }
+
+    log.info("=== RETRIEVAL END ===");
     return filtered;
 }
 
@@ -359,32 +385,26 @@ private List<Document> retrieveRelevant(String query) {
     }
 
     private List<Source> buildSources(List<Document> docs) {
-        return docs.stream()
-                .map(d -> {
-                    Source s = new Source();
-                    Map<String, Object> meta = d.getMetadata();
-                    s.setDocumentId((String) meta.getOrDefault("document_id", null));
-                    s.setFileName((String) meta.getOrDefault("file_name", null));
-                    Object pos = meta.get("position");
-                    if (pos != null) {
-                        try {
-                            s.setPosition(Integer.parseInt(pos.toString()));
-                        } catch (NumberFormatException e) {
-                            s.setPosition(0);
-                        }
-                    } else {
-                        s.setPosition(0);
-                    }
-                    Object scoreObj = meta.get("score");
-                    if (scoreObj instanceof Number) {
-                        s.setSimilarityScore(((Number) scoreObj).doubleValue());
-                    } else {
-                        s.setSimilarityScore(null);
-                    }
-                    return s;
-                })
-                .collect(Collectors.toList());
-    }
+    log.info("Building sources from {} documents", docs.size());
+    List<Source> sources = docs.stream()
+            .map(d -> {
+                Source s = new Source();
+                Map<String, Object> meta = d.getMetadata();
+                String docId = (String) meta.get("document_id");
+                String fileName = (String) meta.get("file_name");
+                if (docId == null || fileName == null) {
+                    log.warn("Missing metadata: docId={}, fileName={} for doc content: {}",
+                            docId, fileName,
+                            d.getContent() != null ? d.getContent().substring(0, Math.min(30, d.getContent().length())) : "null");
+                }
+                s.setDocumentId(docId);
+                s.setFileName(fileName);
+                return s;
+            })
+            .collect(Collectors.toList());
+    log.info("Built {} sources", sources.size());
+    return sources;
+}
 
     private ChatResponse mapToChatResponse(
             org.springframework.ai.chat.model.ChatResponse aiResp,

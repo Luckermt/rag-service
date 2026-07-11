@@ -39,6 +39,8 @@ rag:
   retrieval:
     top-k: 5
     similarity-threshold: 0.7
+    strong-threshold: 0.8
+    min-total-score: 1.2
   documents:
     max-file-size: 52428800   # 50 MB
   web-search:
